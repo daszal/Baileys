@@ -42,7 +42,7 @@ import {
 	processSyncAction
 } from '../Utils'
 import { makeMutex } from '../Utils/make-mutex'
-import processMessage from '../Utils/process-message'
+import processMessage, { unwrapSecretEncryptedMessage } from '../Utils/process-message'
 import {
 	type BinaryNode,
 	getBinaryNodeChild,
@@ -1019,6 +1019,10 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	}
 
 	const upsertMessage = ev.createBufferedFunction(async (msg: WAMessage, type: MessageUpsertType) => {
+		if (msg.message?.secretEncryptedMessage || msg.message?.editedMessage?.message?.secretEncryptedMessage) {
+			await unwrapSecretEncryptedMessage(msg, { creds: authState.creds, getMessageForEdit: config.getMessageForEdit, logger })
+		}
+
 		ev.emit('messages.upsert', { messages: [msg], type })
 
 		if (!!msg.pushName) {

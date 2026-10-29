@@ -118,7 +118,8 @@ export const isRealMessage = (message: WAMessage) => {
 		hasSomeContent &&
 		!normalizedContent?.protocolMessage &&
 		!normalizedContent?.reactionMessage &&
-		!normalizedContent?.pollUpdateMessage
+		!normalizedContent?.pollUpdateMessage &&
+		!normalizedContent?.secretEncryptedMessage
 	)
 }
 
@@ -215,6 +216,130 @@ export function decryptEventResponse(
 
 	function toBinary(txt: string) {
 		return Buffer.from(txt)
+	}
+}
+
+export function decryptMessageEdit(
+	{ encPayload, encIv }: proto.Message.ISecretEncryptedMessage,
+	{ origMsgId, authorJid, msgEncKey }: { origMsgId: string; authorJid: string; msgEncKey: Uint8Array }
+) {
+	const info = Buffer.concat([
+		Buffer.from(origMsgId),
+		Buffer.from(authorJid),
+		Buffer.from(authorJid),
+		Buffer.from('Message Edit'),
+		new Uint8Array([1])
+	])
+	const key0 = hmacSign(msgEncKey, new Uint8Array(32), 'sha256')
+	const decKey = hmacSign(info, key0, 'sha256')
+	return proto.Message.decode(aesDecryptGCM(encPayload!, decKey, encIv!, new Uint8Array(0)))
+}
+
+export const unwrapSecretEncryptedMessage = async (
+	message: WAMessage,
+	{
+		creds,
+		getMessageForEdit,
+		logger
+	}: {
+		creds: AuthenticationCreds
+		getMessageForEdit?: (key: WAMessageKey) => Promise<WAMessage | undefined>
+		logger?: ILogger
+	}
+) => {
+	const content = normalizeMessageContent(message.message)
+	const secretEdit = content?.secretEncryptedMessage
+	if (
+		!secretEdit?.encPayload ||
+		!secretEdit.encIv ||
+		secretEdit.secretEncType !== proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
+	) {
+		return
+	}
+
+	const key = secretEdit.targetMessageKey
+	if (!key?.id || !key.remoteJid || typeof key.fromMe !== 'boolean') {
+		logger?.warn('message edit: target key unavailable')
+		return
+	}
+	if (
+		message.key.fromMe !== key.fromMe ||
+		message.key.remoteJid !== key.remoteJid ||
+		(message.key.participant || '') !== (key.participant || '')
+	) {
+		logger?.warn('message edit: envelope identity mismatch')
+		return
+	}
+	if (!getMessageForEdit) {
+		logger?.warn('message edit: strict original lookup unavailable')
+		return
+	}
+
+	try {
+		const original = await getMessageForEdit(key as WAMessageKey)
+		if (
+			!original?.message ||
+			original.key.id !== key.id ||
+			original.key.fromMe !== key.fromMe ||
+			original.key.remoteJid !== key.remoteJid ||
+			(original.key.participant || '') !== (key.participant || '')
+		) {
+			logger?.warn('message edit: exact original not found')
+			return
+		}
+
+		let msgEncKey = original.message.messageContextInfo?.messageSecret as Uint8Array | string | null | undefined
+		if (typeof msgEncKey === 'string') {
+			msgEncKey = Buffer.from(msgEncKey, 'base64')
+		}
+		if (msgEncKey?.length !== 32) {
+			logger?.warn('message edit: original secret unavailable')
+			return
+		}
+
+		// shortcut: external PN/LID aliases are not tried without a trusted mapping source.
+		const authorJids = key.fromMe
+			? [creds.me?.id, creds.me?.lid].filter((jid): jid is string => !!jid)
+			: [key.participant || key.remoteJid]
+		let decoded: proto.Message | undefined
+		let lastError: unknown
+		for (const authorJid of authorJids) {
+			try {
+				decoded = decryptMessageEdit(secretEdit, {
+					origMsgId: key.id,
+					authorJid: jidNormalizedUser(authorJid),
+					msgEncKey
+				})
+				break
+			} catch (error) {
+				lastError = error
+			}
+		}
+		if (!decoded) {
+			throw lastError
+		}
+		if (decoded.protocolMessage) {
+			if (
+				decoded.protocolMessage.type !== proto.Message.ProtocolMessage.Type.MESSAGE_EDIT ||
+				!decoded.protocolMessage.editedMessage
+			) {
+				logger?.warn('message edit: decrypted payload is not an edit')
+				return
+			}
+			decoded.protocolMessage.key = key
+		} else {
+			decoded.protocolMessage = {
+				key,
+				type: proto.Message.ProtocolMessage.Type.MESSAGE_EDIT,
+				editedMessage: decoded
+			}
+		}
+		if (!decoded.messageContextInfo && content?.messageContextInfo) {
+			decoded.messageContextInfo = content.messageContextInfo
+		}
+		message.message = decoded
+	} catch {
+		logger?.warn('message edit: authenticated decryption failed')
 	}
 }
 
