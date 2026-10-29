@@ -36,6 +36,7 @@ import type { ILogger } from './logger'
 
 type ProcessMessageContext = {
 	shouldProcessHistoryMsg: boolean
+	isSecretEdit?: boolean
 	placeholderResendCache?: CacheStore
 	creds: AuthenticationCreds
 	keyStore: SignalKeyStoreWithTransaction
@@ -235,6 +236,19 @@ export function decryptMessageEdit(
 	return proto.Message.decode(aesDecryptGCM(encPayload!, decKey, encIv!, new Uint8Array(0)))
 }
 
+const editIdentityNamespace = (key: Partial<WAMessageKey>) => {
+	const jids = [key.remoteJid, key.participant, key.remoteJidAlt, key.participantAlt].filter(
+		(jid): jid is string => !!jid
+	)
+	if (jids.some(jid => jid.endsWith('@lid'))) return 'lid'
+	if (jids.some(jid => jid.endsWith('@s.whatsapp.net'))) return 'phone'
+	return 'other'
+}
+
+const logEditDiagnostic = (logger: ILogger | undefined, stage: string, fields: Record<string, boolean | string>) => {
+	logger?.info({ diagnostic: 'whatsapp_edit', stage, ...fields })
+}
+
 export const unwrapSecretEncryptedMessage = async (
 	message: WAMessage,
 	{
@@ -249,16 +263,30 @@ export const unwrapSecretEncryptedMessage = async (
 ) => {
 	const content = normalizeMessageContent(message.message)
 	const secretEdit = content?.secretEncryptedMessage
+	logEditDiagnostic(logger, 'encrypted_envelope_received', {
+		envelope_present: !!secretEdit,
+		envelope_type: secretEdit
+			? secretEdit.secretEncType === proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
+				? 'message_edit'
+				: 'other'
+			: 'none',
+		target_key_present: !!secretEdit?.targetMessageKey,
+		identity_namespace: editIdentityNamespace(message.key),
+		direction_known: typeof message.key.fromMe === 'boolean',
+		from_me: message.key.fromMe === true
+	})
 	if (
 		!secretEdit?.encPayload ||
 		!secretEdit.encIv ||
 		secretEdit.secretEncType !== proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
 	) {
+		logEditDiagnostic(logger, 'decryption_result', { result: 'unsupported_envelope' })
 		return false
 	}
 
 	const key = secretEdit.targetMessageKey as WAMessageKey
 	if (!key?.id || !key.remoteJid || typeof key.fromMe !== 'boolean') {
+		logEditDiagnostic(logger, 'original_lookup', { result: 'invalid_target_key' })
 		logger?.warn('message edit: target key unavailable')
 		return false
 	}
@@ -269,91 +297,97 @@ export const unwrapSecretEncryptedMessage = async (
 		(message.key.remoteJidAlt || '') !== (key.remoteJidAlt || '') ||
 		(message.key.participantAlt || '') !== (key.participantAlt || '')
 	) {
+		logEditDiagnostic(logger, 'original_lookup', { result: 'envelope_identity_mismatch' })
 		logger?.warn('message edit: envelope identity mismatch')
 		return false
 	}
 	if (!getMessageForEdit) {
+		logEditDiagnostic(logger, 'original_lookup', { result: 'callback_unavailable' })
 		logger?.warn('message edit: strict original lookup unavailable')
 		return false
 	}
 
+	let original: WAMessage | undefined
 	try {
-		const original = await getMessageForEdit(key as WAMessageKey)
-		if (
-			!original?.message ||
-			original.key.id !== key.id ||
-			original.key.fromMe !== key.fromMe ||
-			original.key.remoteJid !== key.remoteJid ||
-			(original.key.participant || '') !== (key.participant || '') ||
-			(original.key.remoteJidAlt || '') !== (key.remoteJidAlt || '') ||
-			(original.key.participantAlt || '') !== (key.participantAlt || '')
-		) {
-			logger?.warn('message edit: exact original not found')
-			return false
-		}
-
-		let msgEncKey = original.message.messageContextInfo?.messageSecret as Uint8Array | string | null | undefined
-		if (typeof msgEncKey === 'string') {
-			msgEncKey = Buffer.from(msgEncKey, 'base64')
-		}
-		if (msgEncKey?.length !== 32) {
-			logger?.warn('message edit: original secret unavailable')
-			return false
-		}
-
-		const authorJids = key.fromMe
-			? [creds.me?.id, creds.me?.lid].filter((jid): jid is string => !!jid)
-			: [key.participant || key.remoteJid, key.participantAlt || key.remoteJidAlt].filter(
-					(jid): jid is string => !!jid
-				)
-		let decoded: proto.Message | undefined
-		let lastError: unknown
-		for (const authorJid of authorJids) {
-			try {
-				decoded = decryptMessageEdit(secretEdit, {
-					origMsgId: key.id,
-					authorJid: jidNormalizedUser(authorJid),
-					msgEncKey
-				})
-				break
-			} catch (error) {
-				lastError = error
-			}
-		}
-		if (!decoded) {
-			throw lastError
-		}
-		if (decoded.protocolMessage) {
-			if (
-				decoded.protocolMessage.type !== proto.Message.ProtocolMessage.Type.MESSAGE_EDIT ||
-				!decoded.protocolMessage.editedMessage
-			) {
-				logger?.warn('message edit: decrypted payload is not an edit')
-				return false
-			}
-			decoded.protocolMessage.key = key
-		} else {
-			decoded.protocolMessage = {
-				key,
-				type: proto.Message.ProtocolMessage.Type.MESSAGE_EDIT,
-				editedMessage: decoded
-			}
-		}
-		if (!decoded.messageContextInfo && content?.messageContextInfo) {
-			decoded.messageContextInfo = content.messageContextInfo
-		}
-		message.message = decoded
-		return true
+		original = await getMessageForEdit(key)
 	} catch {
+		logEditDiagnostic(logger, 'original_lookup', { result: 'error' })
+		return false
+	}
+	const exactOriginalMatches =
+		!!original?.message &&
+		original.key.id === key.id &&
+		original.key.fromMe === key.fromMe &&
+		original.key.remoteJid === key.remoteJid &&
+		(original.key.participant || '') === (key.participant || '') &&
+		(original.key.remoteJidAlt || '') === (key.remoteJidAlt || '') &&
+		(original.key.participantAlt || '') === (key.participantAlt || '')
+	logEditDiagnostic(logger, 'original_lookup', { result: exactOriginalMatches ? 'matched' : 'no_exact_match' })
+	if (!exactOriginalMatches || !original?.message) {
+		logger?.warn('message edit: exact original not found')
+		return false
+	}
+
+	let msgEncKey = original.message.messageContextInfo?.messageSecret as Uint8Array | string | null | undefined
+	if (typeof msgEncKey === 'string') {
+		msgEncKey = Buffer.from(msgEncKey, 'base64')
+	}
+	if (!(msgEncKey instanceof Uint8Array) || msgEncKey.length !== 32) {
+		logEditDiagnostic(logger, 'original_secret', { available: false })
+		logger?.warn('message edit: original secret unavailable')
+		return false
+	}
+	logEditDiagnostic(logger, 'original_secret', { available: true })
+
+	const authorJids = key.fromMe
+		? [creds.me?.id, creds.me?.lid].filter((jid): jid is string => !!jid)
+		: [key.participant || key.remoteJid, key.participantAlt || key.remoteJidAlt].filter((jid): jid is string => !!jid)
+	let decoded: proto.Message | undefined
+	for (const authorJid of authorJids) {
+		try {
+			decoded = decryptMessageEdit(secretEdit, {
+				origMsgId: key.id,
+				authorJid: jidNormalizedUser(authorJid),
+				msgEncKey
+			})
+			break
+		} catch {}
+	}
+	if (!decoded) {
+		logEditDiagnostic(logger, 'decryption_result', { result: 'authentication_failed' })
 		logger?.warn('message edit: authenticated decryption failed')
 		return false
 	}
+	if (decoded.protocolMessage) {
+		if (
+			decoded.protocolMessage.type !== proto.Message.ProtocolMessage.Type.MESSAGE_EDIT ||
+			!decoded.protocolMessage.editedMessage
+		) {
+			logEditDiagnostic(logger, 'decryption_result', { result: 'not_an_edit' })
+			logger?.warn('message edit: decrypted payload is not an edit')
+			return false
+		}
+		decoded.protocolMessage.key = key
+	} else {
+		decoded.protocolMessage = {
+			key,
+			type: proto.Message.ProtocolMessage.Type.MESSAGE_EDIT,
+			editedMessage: decoded
+		}
+	}
+	if (!decoded.messageContextInfo && content?.messageContextInfo) {
+		decoded.messageContextInfo = content.messageContextInfo
+	}
+	message.message = decoded
+	logEditDiagnostic(logger, 'decryption_result', { result: 'success' })
+	return true
 }
 
 const processMessage = async (
 	message: WAMessage,
 	{
 		shouldProcessHistoryMsg,
+		isSecretEdit,
 		placeholderResendCache,
 		ev,
 		creds,
@@ -494,6 +528,13 @@ const processMessage = async (
 
 				break
 			case proto.Message.ProtocolMessage.Type.MESSAGE_EDIT:
+				logEditDiagnostic(logger, 'messages_update_emission', {
+					source: isSecretEdit ? 'encrypted' : 'protocol',
+					target_key_present: !!protocolMsg.key?.id,
+					identity_namespace: editIdentityNamespace(message.key),
+					direction_known: typeof message.key.fromMe === 'boolean',
+					from_me: message.key.fromMe === true
+				})
 				ev.emit('messages.update', [
 					{
 						// flip the sender / fromMe properties because they're in the perspective of the sender

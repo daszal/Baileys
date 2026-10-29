@@ -1019,7 +1019,9 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	}
 
 	const upsertMessage = ev.createBufferedFunction(async (msg: WAMessage, type: MessageUpsertType) => {
-		const isSecretEdit = !!(msg.message?.secretEncryptedMessage || msg.message?.editedMessage?.message?.secretEncryptedMessage)
+		const isSecretEdit = !!(
+			msg.message?.secretEncryptedMessage || msg.message?.editedMessage?.message?.secretEncryptedMessage
+		)
 		if (isSecretEdit) {
 			const decrypted = await unwrapSecretEncryptedMessage(msg, {
 				creds: authState.creds,
@@ -1095,6 +1097,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 			processMessage(msg, {
 				signalRepository,
 				shouldProcessHistoryMsg,
+				isSecretEdit,
 				placeholderResendCache,
 				ev,
 				creds: authState.creds,
