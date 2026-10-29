@@ -257,7 +257,7 @@ export const unwrapSecretEncryptedMessage = async (
 		return false
 	}
 
-	const key = secretEdit.targetMessageKey
+	const key = secretEdit.targetMessageKey as WAMessageKey
 	if (!key?.id || !key.remoteJid || typeof key.fromMe !== 'boolean') {
 		logger?.warn('message edit: target key unavailable')
 		return false
@@ -265,7 +265,9 @@ export const unwrapSecretEncryptedMessage = async (
 	if (
 		message.key.fromMe !== key.fromMe ||
 		message.key.remoteJid !== key.remoteJid ||
-		(message.key.participant || '') !== (key.participant || '')
+		(message.key.participant || '') !== (key.participant || '') ||
+		(message.key.remoteJidAlt || '') !== (key.remoteJidAlt || '') ||
+		(message.key.participantAlt || '') !== (key.participantAlt || '')
 	) {
 		logger?.warn('message edit: envelope identity mismatch')
 		return false
@@ -282,7 +284,9 @@ export const unwrapSecretEncryptedMessage = async (
 			original.key.id !== key.id ||
 			original.key.fromMe !== key.fromMe ||
 			original.key.remoteJid !== key.remoteJid ||
-			(original.key.participant || '') !== (key.participant || '')
+			(original.key.participant || '') !== (key.participant || '') ||
+			(original.key.remoteJidAlt || '') !== (key.remoteJidAlt || '') ||
+			(original.key.participantAlt || '') !== (key.participantAlt || '')
 		) {
 			logger?.warn('message edit: exact original not found')
 			return false
@@ -297,10 +301,11 @@ export const unwrapSecretEncryptedMessage = async (
 			return false
 		}
 
-		// shortcut: external PN/LID aliases are not tried without a trusted mapping source.
 		const authorJids = key.fromMe
 			? [creds.me?.id, creds.me?.lid].filter((jid): jid is string => !!jid)
-			: [key.participant || key.remoteJid]
+			: [key.participant || key.remoteJid, key.participantAlt || key.remoteJidAlt].filter(
+					(jid): jid is string => !!jid
+				)
 		let decoded: proto.Message | undefined
 		let lastError: unknown
 		for (const authorJid of authorJids) {

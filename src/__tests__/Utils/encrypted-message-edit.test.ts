@@ -94,6 +94,21 @@ describe('encrypted message edits', () => {
 		expect(msg.message?.protocolMessage?.editedMessage?.conversation).toBe('self edit')
 	})
 
+	it('uses a phone/LID alternate only when the exact pair is on both event and stored keys', async () => {
+		const pn = 'test-user@s.whatsapp.net'
+		const msg = envelope(
+			seal(editInner('mapped edit'), messageId, pn),
+			{ remoteJidAlt: pn },
+			{ remoteJidAlt: pn }
+		)
+		const stored = original({ remoteJidAlt: pn })
+		await unwrapSecretEncryptedMessage(msg, {
+			creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds,
+			getMessageForEdit: async () => stored
+		})
+		expect(msg.message?.protocolMessage?.editedMessage?.conversation).toBe('mapped edit')
+	})
+
 	it('accepts the stored base64 message secret representation', async () => {
 		const msg = envelope(seal(editInner('edited')))
 		const stored = original()
