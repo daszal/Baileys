@@ -41,6 +41,7 @@ import {
 	newLTHashState,
 	processSyncAction
 } from '../Utils'
+import { normalizeMessageContent } from '../Utils/messages'
 import { makeMutex } from '../Utils/make-mutex'
 import processMessage, { unwrapSecretEncryptedMessage } from '../Utils/process-message'
 import {
@@ -1019,9 +1020,7 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	}
 
 	const upsertMessage = ev.createBufferedFunction(async (msg: WAMessage, type: MessageUpsertType) => {
-		const isSecretEdit = !!(
-			msg.message?.secretEncryptedMessage || msg.message?.editedMessage?.message?.secretEncryptedMessage
-		)
+		const isSecretEdit = !!normalizeMessageContent(msg.message)?.secretEncryptedMessage
 		if (isSecretEdit) {
 			const decrypted = await unwrapSecretEncryptedMessage(msg, {
 				creds: authState.creds,

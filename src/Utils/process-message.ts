@@ -245,8 +245,8 @@ const editIdentityNamespace = (key: Partial<WAMessageKey>) => {
 	return 'other'
 }
 
-const logEditDiagnostic = (logger: ILogger | undefined, stage: string, fields: Record<string, boolean | string>) => {
-	logger?.info({ diagnostic: 'whatsapp_edit', stage, ...fields })
+const logEditDiagnostic = (stage: string, fields: Record<string, boolean | string>) => {
+	console.info({ diagnostic: 'whatsapp_edit', stage, ...fields })
 }
 
 export const unwrapSecretEncryptedMessage = async (
@@ -263,7 +263,10 @@ export const unwrapSecretEncryptedMessage = async (
 ) => {
 	const content = normalizeMessageContent(message.message)
 	const secretEdit = content?.secretEncryptedMessage
-	logEditDiagnostic(logger, 'encrypted_envelope_received', {
+	if (!secretEdit) {
+		return false
+	}
+	logEditDiagnostic('encrypted_envelope_received', {
 		envelope_present: !!secretEdit,
 		envelope_type: secretEdit
 			? secretEdit.secretEncType === proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
@@ -280,13 +283,13 @@ export const unwrapSecretEncryptedMessage = async (
 		!secretEdit.encIv ||
 		secretEdit.secretEncType !== proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
 	) {
-		logEditDiagnostic(logger, 'decryption_result', { result: 'unsupported_envelope' })
+		logEditDiagnostic('decryption_result', { result: 'unsupported_envelope' })
 		return false
 	}
 
 	const key = secretEdit.targetMessageKey as WAMessageKey
 	if (!key?.id || !key.remoteJid || typeof key.fromMe !== 'boolean') {
-		logEditDiagnostic(logger, 'original_lookup', { result: 'invalid_target_key' })
+		logEditDiagnostic('original_lookup', { result: 'invalid_target_key' })
 		logger?.warn('message edit: target key unavailable')
 		return false
 	}
@@ -297,12 +300,12 @@ export const unwrapSecretEncryptedMessage = async (
 		(message.key.remoteJidAlt || '') !== (key.remoteJidAlt || '') ||
 		(message.key.participantAlt || '') !== (key.participantAlt || '')
 	) {
-		logEditDiagnostic(logger, 'original_lookup', { result: 'envelope_identity_mismatch' })
+		logEditDiagnostic('original_lookup', { result: 'envelope_identity_mismatch' })
 		logger?.warn('message edit: envelope identity mismatch')
 		return false
 	}
 	if (!getMessageForEdit) {
-		logEditDiagnostic(logger, 'original_lookup', { result: 'callback_unavailable' })
+		logEditDiagnostic('original_lookup', { result: 'callback_unavailable' })
 		logger?.warn('message edit: strict original lookup unavailable')
 		return false
 	}
@@ -311,7 +314,7 @@ export const unwrapSecretEncryptedMessage = async (
 	try {
 		original = await getMessageForEdit(key)
 	} catch {
-		logEditDiagnostic(logger, 'original_lookup', { result: 'error' })
+		logEditDiagnostic('original_lookup', { result: 'error' })
 		return false
 	}
 	const exactOriginalMatches =
@@ -322,7 +325,7 @@ export const unwrapSecretEncryptedMessage = async (
 		(original.key.participant || '') === (key.participant || '') &&
 		(original.key.remoteJidAlt || '') === (key.remoteJidAlt || '') &&
 		(original.key.participantAlt || '') === (key.participantAlt || '')
-	logEditDiagnostic(logger, 'original_lookup', { result: exactOriginalMatches ? 'matched' : 'no_exact_match' })
+	logEditDiagnostic('original_lookup', { result: exactOriginalMatches ? 'matched' : 'no_exact_match' })
 	if (!exactOriginalMatches || !original?.message) {
 		logger?.warn('message edit: exact original not found')
 		return false
@@ -333,11 +336,11 @@ export const unwrapSecretEncryptedMessage = async (
 		msgEncKey = Buffer.from(msgEncKey, 'base64')
 	}
 	if (!(msgEncKey instanceof Uint8Array) || msgEncKey.length !== 32) {
-		logEditDiagnostic(logger, 'original_secret', { available: false })
+		logEditDiagnostic('original_secret', { available: false })
 		logger?.warn('message edit: original secret unavailable')
 		return false
 	}
-	logEditDiagnostic(logger, 'original_secret', { available: true })
+	logEditDiagnostic('original_secret', { available: true })
 
 	const authorJids = key.fromMe
 		? [creds.me?.id, creds.me?.lid].filter((jid): jid is string => !!jid)
@@ -354,7 +357,7 @@ export const unwrapSecretEncryptedMessage = async (
 		} catch {}
 	}
 	if (!decoded) {
-		logEditDiagnostic(logger, 'decryption_result', { result: 'authentication_failed' })
+		logEditDiagnostic('decryption_result', { result: 'authentication_failed' })
 		logger?.warn('message edit: authenticated decryption failed')
 		return false
 	}
@@ -363,7 +366,7 @@ export const unwrapSecretEncryptedMessage = async (
 			decoded.protocolMessage.type !== proto.Message.ProtocolMessage.Type.MESSAGE_EDIT ||
 			!decoded.protocolMessage.editedMessage
 		) {
-			logEditDiagnostic(logger, 'decryption_result', { result: 'not_an_edit' })
+			logEditDiagnostic('decryption_result', { result: 'not_an_edit' })
 			logger?.warn('message edit: decrypted payload is not an edit')
 			return false
 		}
@@ -379,7 +382,7 @@ export const unwrapSecretEncryptedMessage = async (
 		decoded.messageContextInfo = content.messageContextInfo
 	}
 	message.message = decoded
-	logEditDiagnostic(logger, 'decryption_result', { result: 'success' })
+	logEditDiagnostic('decryption_result', { result: 'success' })
 	return true
 }
 
@@ -528,7 +531,7 @@ const processMessage = async (
 
 				break
 			case proto.Message.ProtocolMessage.Type.MESSAGE_EDIT:
-				logEditDiagnostic(logger, 'messages_update_emission', {
+				logEditDiagnostic('messages_update_emission', {
 					source: isSecretEdit ? 'encrypted' : 'protocol',
 					target_key_present: !!protocolMsg.key?.id,
 					identity_namespace: editIdentityNamespace(message.key),

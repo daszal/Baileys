@@ -79,33 +79,79 @@ describe('encrypted message edits', () => {
 		const msg = envelope(seal(editInner('edited')))
 		expect(isRealMessage(msg)).toBe(false)
 		const getMessageForEdit = jest.fn(async () => original())
-		const diagnostics: unknown[] = []
-		const logger = { info: (record: unknown) => diagnostics.push(record) } as any
-		await unwrapSecretEncryptedMessage(msg, {
-			creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds,
-			getMessageForEdit,
-			logger
-		})
-		const ev = makeEmitter()
-		const updates: any[] = []
-		ev.on('messages.update', value => updates.push(value))
-		await process(msg, ev, logger, true)
-		expect(getMessageForEdit).toHaveBeenCalledWith({ remoteJid: chat, fromMe: false, id: messageId })
-		expect(updates).toHaveLength(1)
-		expect(updates[0][0].key).toMatchObject({ remoteJid: chat, fromMe: false, id: messageId })
-		expect(updates[0][0].update.message.editedMessage.message.conversation).toBe('edited')
-		expect(diagnostics.map((entry: any) => entry.stage)).toEqual([
-			'encrypted_envelope_received',
-			'original_lookup',
-			'original_secret',
-			'decryption_result',
-			'messages_update_emission'
-		])
-		expect((diagnostics.at(-1) as any).source).toBe('encrypted')
-		const diagnosticText = JSON.stringify(diagnostics)
-		expect(diagnosticText).not.toContain(messageId)
-		expect(diagnosticText).not.toContain(chat)
-		expect(diagnosticText).not.toContain('edited')
+		const logger = { info: jest.fn() } as any
+		const output = jest.spyOn(console, 'info').mockImplementation(() => {})
+		const diagnostics: any[] = []
+		try {
+			await unwrapSecretEncryptedMessage(msg, {
+				creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds,
+				getMessageForEdit,
+				logger
+			})
+			const ev = makeEmitter()
+			const updates: any[] = []
+			ev.on('messages.update', value => updates.push(value))
+			await process(msg, ev, logger, true)
+			diagnostics.push(...output.mock.calls.map(([record]) => record))
+			expect(getMessageForEdit).toHaveBeenCalledWith({ remoteJid: chat, fromMe: false, id: messageId })
+			expect(updates).toHaveLength(1)
+			expect(updates[0][0].key).toMatchObject({ remoteJid: chat, fromMe: false, id: messageId })
+			expect(updates[0][0].update.message.editedMessage.message.conversation).toBe('edited')
+			expect(diagnostics.map((entry: any) => entry.stage)).toEqual([
+				'encrypted_envelope_received',
+				'original_lookup',
+				'original_secret',
+				'decryption_result',
+				'messages_update_emission'
+			])
+			expect((diagnostics.at(-1) as any).source).toBe('encrypted')
+			const diagnosticText = JSON.stringify(diagnostics)
+			expect(diagnosticText).not.toContain(messageId)
+			expect(diagnosticText).not.toContain(chat)
+			expect(diagnosticText).not.toContain('edited')
+			expect(logger.info).not.toHaveBeenCalled()
+		} finally {
+			output.mockRestore()
+		}
+	})
+
+	it('does not emit an envelope diagnostic for ordinary messages', async () => {
+		const output = jest.spyOn(console, 'info').mockImplementation(() => {})
+		try {
+			const ordinary: WAMessage = { key: { remoteJid: chat, fromMe: false }, message: { conversation: 'ordinary' } }
+			expect(
+				await unwrapSecretEncryptedMessage(ordinary, {
+					creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds
+				})
+			).toBe(false)
+			expect(output).not.toHaveBeenCalled()
+		} finally {
+			output.mockRestore()
+		}
+	})
+
+	it('finds an encrypted edit inside a supported content wrapper', async () => {
+		const msg = envelope(seal(editInner('wrapped edit')))
+		msg.message = { ephemeralMessage: { message: msg.message! } }
+		const getMessageForEdit = jest.fn(async () => original())
+		const output = jest.spyOn(console, 'info').mockImplementation(() => {})
+		try {
+			expect(
+				await unwrapSecretEncryptedMessage(msg, {
+					creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds,
+					getMessageForEdit
+				})
+			).toBe(true)
+			expect(getMessageForEdit).toHaveBeenCalledTimes(1)
+			expect(msg.message?.protocolMessage?.editedMessage?.conversation).toBe('wrapped edit')
+			expect(output.mock.calls[0]![0]).toMatchObject({
+				diagnostic: 'whatsapp_edit',
+				stage: 'encrypted_envelope_received',
+				envelope_type: 'message_edit'
+			})
+		} finally {
+			output.mockRestore()
+		}
 	})
 
 	it('uses the paired self LID from authenticated credentials for self-authored group edits', async () => {
