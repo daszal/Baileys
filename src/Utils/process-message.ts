@@ -293,19 +293,25 @@ export const unwrapSecretEncryptedMessage = async (
 		logger?.warn('message edit: target key unavailable')
 		return false
 	}
+	// SecretEncryptedMessage.targetMessageKey is proto.MessageKey; alternate JIDs exist only on received WAMessage keys.
+	const envelopeKeyMismatches = {
+		envelope_from_me_mismatch: message.key.fromMe !== key.fromMe,
+		envelope_remote_jid_mismatch: message.key.remoteJid !== key.remoteJid,
+		envelope_participant_mismatch: (message.key.participant || '') !== (key.participant || ''),
+		envelope_remote_jid_alt_mismatch: (message.key.remoteJidAlt || '') !== (key.remoteJidAlt || ''),
+		envelope_participant_alt_mismatch: (message.key.participantAlt || '') !== (key.participantAlt || '')
+	}
 	if (
-		message.key.fromMe !== key.fromMe ||
-		message.key.remoteJid !== key.remoteJid ||
-		(message.key.participant || '') !== (key.participant || '') ||
-		(message.key.remoteJidAlt || '') !== (key.remoteJidAlt || '') ||
-		(message.key.participantAlt || '') !== (key.participantAlt || '')
+		envelopeKeyMismatches.envelope_from_me_mismatch ||
+		envelopeKeyMismatches.envelope_remote_jid_mismatch ||
+		envelopeKeyMismatches.envelope_participant_mismatch
 	) {
-		logEditDiagnostic('original_lookup', { result: 'envelope_identity_mismatch' })
+		logEditDiagnostic('original_lookup', { result: 'envelope_identity_mismatch', ...envelopeKeyMismatches })
 		logger?.warn('message edit: envelope identity mismatch')
 		return false
 	}
 	if (!getMessageForEdit) {
-		logEditDiagnostic('original_lookup', { result: 'callback_unavailable' })
+		logEditDiagnostic('original_lookup', { result: 'callback_unavailable', ...envelopeKeyMismatches })
 		logger?.warn('message edit: strict original lookup unavailable')
 		return false
 	}
@@ -314,7 +320,7 @@ export const unwrapSecretEncryptedMessage = async (
 	try {
 		original = await getMessageForEdit(key)
 	} catch {
-		logEditDiagnostic('original_lookup', { result: 'error' })
+		logEditDiagnostic('original_lookup', { result: 'error', ...envelopeKeyMismatches })
 		return false
 	}
 	const exactOriginalMatches =
@@ -322,10 +328,11 @@ export const unwrapSecretEncryptedMessage = async (
 		original.key.id === key.id &&
 		original.key.fromMe === key.fromMe &&
 		original.key.remoteJid === key.remoteJid &&
-		(original.key.participant || '') === (key.participant || '') &&
-		(original.key.remoteJidAlt || '') === (key.remoteJidAlt || '') &&
-		(original.key.participantAlt || '') === (key.participantAlt || '')
-	logEditDiagnostic('original_lookup', { result: exactOriginalMatches ? 'matched' : 'no_exact_match' })
+		(original.key.participant || '') === (key.participant || '')
+	logEditDiagnostic('original_lookup', {
+		result: exactOriginalMatches ? 'matched' : 'no_exact_match',
+		...envelopeKeyMismatches
+	})
 	if (!exactOriginalMatches || !original?.message) {
 		logger?.warn('message edit: exact original not found')
 		return false

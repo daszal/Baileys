@@ -37,7 +37,7 @@ const editInner = (text: string): proto.IMessage => ({
 const envelope = (
 	sealed: { encPayload: Uint8Array; encIv: Uint8Array },
 	changes: Partial<WAMessage['key']> = {},
-	targetChanges: Partial<WAMessage['key']> = {}
+	targetChanges: Partial<proto.IMessageKey> = {}
 ): WAMessage => ({
 	key: { remoteJid: chat, fromMe: false, id: 'ENVELOPE_TEST_ID', ...changes },
 	message: {
@@ -107,8 +107,11 @@ describe('encrypted message edits', () => {
 			expect((diagnostics.at(-1) as any).source).toBe('encrypted')
 			const diagnosticText = JSON.stringify(diagnostics)
 			expect(diagnosticText).not.toContain(messageId)
+			expect(diagnosticText).not.toContain('ENVELOPE_TEST_ID')
 			expect(diagnosticText).not.toContain(chat)
 			expect(diagnosticText).not.toContain('edited')
+			expect(diagnosticText).not.toContain(messageSecret.toString('base64'))
+			expect(diagnosticText).not.toContain('self@s.whatsapp.net')
 			expect(logger.info).not.toHaveBeenCalled()
 		} finally {
 			output.mockRestore()
@@ -168,16 +171,168 @@ describe('encrypted message edits', () => {
 		expect(msg.message?.protocolMessage?.editedMessage?.conversation).toBe('self edit')
 	})
 
-	it('uses a phone/LID alternate only when the exact pair is on both event and stored keys', async () => {
+	it('matches a direct protobuf key when the receive key has an alternate JID', async () => {
 		const pn = 'test-user@s.whatsapp.net'
-		const msg = envelope(seal(editInner('mapped edit'), messageId, pn), { remoteJidAlt: pn }, { remoteJidAlt: pn })
+		const msg = envelope(seal(editInner('mapped edit')), { remoteJidAlt: pn })
 		const stored = original({ remoteJidAlt: pn })
-		await unwrapSecretEncryptedMessage(msg, {
-			creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds,
-			getMessageForEdit: async () => stored
-		})
-		expect(msg.message?.protocolMessage?.editedMessage?.conversation).toBe('mapped edit')
+		const getMessageForEdit = jest.fn(async () => stored)
+		const output = jest.spyOn(console, 'info').mockImplementation(() => {})
+		try {
+			await unwrapSecretEncryptedMessage(msg, {
+				creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds,
+				getMessageForEdit
+			})
+			expect(getMessageForEdit).toHaveBeenCalledWith({ remoteJid: chat, fromMe: false, id: messageId })
+			expect(msg.message?.protocolMessage?.editedMessage?.conversation).toBe('mapped edit')
+			const lookup = output.mock.calls.map(([record]) => record as any).find(record => record.result === 'matched')
+			expect(lookup).toMatchObject({
+				envelope_from_me_mismatch: false,
+				envelope_remote_jid_mismatch: false,
+				envelope_participant_mismatch: false,
+				envelope_remote_jid_alt_mismatch: true,
+				envelope_participant_alt_mismatch: false
+			})
+			const diagnosticText = JSON.stringify(output.mock.calls)
+			for (const privateValue of [
+				messageId,
+				'ENVELOPE_TEST_ID',
+				chat,
+				pn,
+				'mapped edit',
+				messageSecret.toString('base64'),
+				'self@s.whatsapp.net'
+			]) {
+				expect(diagnosticText).not.toContain(privateValue)
+			}
+		} finally {
+			output.mockRestore()
+		}
 	})
+
+	it('matches a group protobuf key when the receive key has a participant alternate', async () => {
+		const group = 'test-group@g.us'
+		const participant = 'test-author@lid'
+		const pn = 'test-author@s.whatsapp.net'
+		const msg = envelope(
+			seal(editInner('group edit'), messageId, participant),
+			{ remoteJid: group, participant, participantAlt: pn },
+			{ remoteJid: group, participant }
+		)
+		const stored = original({ remoteJid: group, participant, participantAlt: pn })
+		const output = jest.spyOn(console, 'info').mockImplementation(() => {})
+		try {
+			await unwrapSecretEncryptedMessage(msg, {
+				creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds,
+				getMessageForEdit: async () => stored
+			})
+			expect(msg.message?.protocolMessage?.editedMessage?.conversation).toBe('group edit')
+			const lookup = output.mock.calls.map(([record]) => record as any).find(record => record.result === 'matched')
+			expect(lookup).toMatchObject({
+				envelope_from_me_mismatch: false,
+				envelope_remote_jid_mismatch: false,
+				envelope_participant_mismatch: false,
+				envelope_remote_jid_alt_mismatch: false,
+				envelope_participant_alt_mismatch: true
+			})
+			const diagnosticText = JSON.stringify(output.mock.calls)
+			for (const privateValue of [
+				messageId,
+				'ENVELOPE_TEST_ID',
+				group,
+				participant,
+				pn,
+				'group edit',
+				messageSecret.toString('base64'),
+				'self@s.whatsapp.net'
+			]) {
+				expect(diagnosticText).not.toContain(privateValue)
+			}
+		} finally {
+			output.mockRestore()
+		}
+	})
+
+	const envelopeMismatchCases: Array<{
+		name: string
+		messageKey: Partial<WAMessage['key']>
+		targetKey: Partial<proto.IMessageKey>
+		expected: Record<string, boolean>
+	}> = [
+		{
+			name: 'fromMe',
+			messageKey: { fromMe: true },
+			targetKey: {},
+			expected: {
+				envelope_from_me_mismatch: true,
+				envelope_remote_jid_mismatch: false,
+				envelope_participant_mismatch: false,
+				envelope_remote_jid_alt_mismatch: false,
+				envelope_participant_alt_mismatch: false
+			}
+		},
+		{
+			name: 'remoteJid',
+			messageKey: { remoteJid: 'other-user@lid' },
+			targetKey: {},
+			expected: {
+				envelope_from_me_mismatch: false,
+				envelope_remote_jid_mismatch: true,
+				envelope_participant_mismatch: false,
+				envelope_remote_jid_alt_mismatch: false,
+				envelope_participant_alt_mismatch: false
+			}
+		},
+		{
+			name: 'participant',
+			messageKey: { remoteJid: 'test-group@g.us', participant: 'outer-author@lid' },
+			targetKey: { remoteJid: 'test-group@g.us', participant: 'target-author@lid' },
+			expected: {
+				envelope_from_me_mismatch: false,
+				envelope_remote_jid_mismatch: false,
+				envelope_participant_mismatch: true,
+				envelope_remote_jid_alt_mismatch: false,
+				envelope_participant_alt_mismatch: false
+			}
+		}
+	]
+
+	it.each(envelopeMismatchCases)(
+		'fails closed for an envelope $name mismatch and logs only booleans',
+		async ({ messageKey, targetKey, expected }) => {
+			const msg = envelope(seal(editInner('private edit body')), messageKey, targetKey)
+			const getMessageForEdit = jest.fn(async () => original())
+			const output = jest.spyOn(console, 'info').mockImplementation(() => {})
+			try {
+				expect(
+					await unwrapSecretEncryptedMessage(msg, {
+						creds: { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds,
+						getMessageForEdit
+					})
+				).toBe(false)
+				expect(getMessageForEdit).not.toHaveBeenCalled()
+				const diagnostic = output.mock.calls
+					.map(([record]) => record as any)
+					.find(record => record.result === 'envelope_identity_mismatch')
+				expect(diagnostic).toMatchObject({ diagnostic: 'whatsapp_edit', stage: 'original_lookup', ...expected })
+				const diagnosticText = JSON.stringify(output.mock.calls)
+				for (const privateValue of [
+					messageId,
+					'ENVELOPE_TEST_ID',
+					chat,
+					'other-user@lid',
+					'outer-author@lid',
+					'target-author@lid',
+					'private edit body',
+					messageSecret.toString('base64'),
+					'self@s.whatsapp.net'
+				]) {
+					expect(diagnosticText).not.toContain(privateValue)
+				}
+			} finally {
+				output.mockRestore()
+			}
+		}
+	)
 
 	it('accepts the stored base64 message secret representation', async () => {
 		const msg = envelope(seal(editInner('edited')))
@@ -212,7 +367,10 @@ describe('encrypted message edits', () => {
 		const credentials = { me: { id: 'self@s.whatsapp.net' } } as AuthenticationCreds
 		for (const getMessageForEdit of [
 			async () => undefined,
+			async () => original({ id: 'OTHER_ORIGINAL_ID' }),
+			async () => original({ fromMe: true }),
 			async () => original({ remoteJid: 'other-user@lid' }),
+			async () => original({ participant: 'other-participant@lid' }),
 			async () => original({}, undefined)
 		]) {
 			const msg = envelope(seal(editInner('edited')))
