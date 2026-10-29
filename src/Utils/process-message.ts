@@ -254,13 +254,13 @@ export const unwrapSecretEncryptedMessage = async (
 		!secretEdit.encIv ||
 		secretEdit.secretEncType !== proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
 	) {
-		return
+		return false
 	}
 
 	const key = secretEdit.targetMessageKey
 	if (!key?.id || !key.remoteJid || typeof key.fromMe !== 'boolean') {
 		logger?.warn('message edit: target key unavailable')
-		return
+		return false
 	}
 	if (
 		message.key.fromMe !== key.fromMe ||
@@ -268,11 +268,11 @@ export const unwrapSecretEncryptedMessage = async (
 		(message.key.participant || '') !== (key.participant || '')
 	) {
 		logger?.warn('message edit: envelope identity mismatch')
-		return
+		return false
 	}
 	if (!getMessageForEdit) {
 		logger?.warn('message edit: strict original lookup unavailable')
-		return
+		return false
 	}
 
 	try {
@@ -285,7 +285,7 @@ export const unwrapSecretEncryptedMessage = async (
 			(original.key.participant || '') !== (key.participant || '')
 		) {
 			logger?.warn('message edit: exact original not found')
-			return
+			return false
 		}
 
 		let msgEncKey = original.message.messageContextInfo?.messageSecret as Uint8Array | string | null | undefined
@@ -294,7 +294,7 @@ export const unwrapSecretEncryptedMessage = async (
 		}
 		if (msgEncKey?.length !== 32) {
 			logger?.warn('message edit: original secret unavailable')
-			return
+			return false
 		}
 
 		// shortcut: external PN/LID aliases are not tried without a trusted mapping source.
@@ -324,7 +324,7 @@ export const unwrapSecretEncryptedMessage = async (
 				!decoded.protocolMessage.editedMessage
 			) {
 				logger?.warn('message edit: decrypted payload is not an edit')
-				return
+				return false
 			}
 			decoded.protocolMessage.key = key
 		} else {
@@ -338,8 +338,10 @@ export const unwrapSecretEncryptedMessage = async (
 			decoded.messageContextInfo = content.messageContextInfo
 		}
 		message.message = decoded
+		return true
 	} catch {
 		logger?.warn('message edit: authenticated decryption failed')
+		return false
 	}
 }
 

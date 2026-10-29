@@ -1019,13 +1019,21 @@ export const makeChatsSocket = (config: SocketConfig) => {
 	}
 
 	const upsertMessage = ev.createBufferedFunction(async (msg: WAMessage, type: MessageUpsertType) => {
-		if (msg.message?.secretEncryptedMessage || msg.message?.editedMessage?.message?.secretEncryptedMessage) {
-			await unwrapSecretEncryptedMessage(msg, { creds: authState.creds, getMessageForEdit: config.getMessageForEdit, logger })
+		const isSecretEdit = !!(msg.message?.secretEncryptedMessage || msg.message?.editedMessage?.message?.secretEncryptedMessage)
+		if (isSecretEdit) {
+			const decrypted = await unwrapSecretEncryptedMessage(msg, {
+				creds: authState.creds,
+				getMessageForEdit: config.getMessageForEdit,
+				logger
+			})
+			if (!decrypted) {
+				return
+			}
+		} else {
+			ev.emit('messages.upsert', { messages: [msg], type })
 		}
 
-		ev.emit('messages.upsert', { messages: [msg], type })
-
-		if (!!msg.pushName) {
+		if (!isSecretEdit && !!msg.pushName) {
 			let jid = msg.key.fromMe ? authState.creds.me!.id : msg.key.participant || msg.key.remoteJid
 			jid = jidNormalizedUser(jid!)
 
