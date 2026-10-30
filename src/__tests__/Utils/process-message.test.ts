@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals'
 import type { WAMessage } from '../../Types'
 import { proto } from '../../../WAProto/index.js'
 import { cleanMessage } from '../../Utils/process-message'
