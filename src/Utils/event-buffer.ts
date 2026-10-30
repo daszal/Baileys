@@ -418,7 +418,7 @@ function append<E extends BufferableEvent>(
 					message.messageTimestamp = existing.messageTimestamp
 				}
 
-				if (data.messageUpdates[key]) {
+				if (data.messageUpdates[key] && !data.messageUpdates[key].revokeTargetKey) {
 					logger.debug('absorbed prior message update in message upsert')
 					Object.assign(message, data.messageUpdates[key].update)
 					delete data.messageUpdates[key]
@@ -437,9 +437,18 @@ function append<E extends BufferableEvent>(
 			break
 		case 'messages.update':
 			const msgUpdates = eventData as BaileysEventMap['messages.update']
-			for (const { key, update } of msgUpdates) {
+			for (const { key, update, revokeTargetKey } of msgUpdates) {
 				const keyStr = stringifyMessageKey(key)
+				const updateKey = revokeTargetKey ? `revoke:${keyStr}` : keyStr
 				const existing = data.historySets.messages[keyStr] || data.messageUpserts[keyStr]?.message
+				if (revokeTargetKey) {
+					const msgUpdate = data.messageUpdates[updateKey] || { key, update: {} }
+					Object.assign(msgUpdate.update, update)
+					msgUpdate.revokeTargetKey = revokeTargetKey
+					data.messageUpdates[updateKey] = msgUpdate
+					continue
+				}
+
 				if (existing) {
 					Object.assign(existing, update)
 					// if the message was received & read by us
@@ -470,7 +479,7 @@ function append<E extends BufferableEvent>(
 						delete data.messageUpserts[keyStr]
 					}
 
-					if (data.messageUpdates[keyStr]) {
+					if (data.messageUpdates[keyStr] && !data.messageUpdates[keyStr].revokeTargetKey) {
 						delete data.messageUpdates[keyStr]
 					}
 				}

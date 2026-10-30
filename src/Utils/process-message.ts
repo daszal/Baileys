@@ -250,6 +250,10 @@ const logEditDiagnostic = (stage: string, fields: Record<string, boolean | strin
 	console.info({ diagnostic: 'whatsapp_edit', stage, ...fields })
 }
 
+const logDeleteDiagnostic = (stage: string, fields: Record<string, boolean | string>) => {
+	console.info({ diagnostic: 'whatsapp_delete', stage, ...fields })
+}
+
 const matchesEditIdentity = (received: WAMessageKey, original: WAMessageKey) => {
 	if (received.fromMe !== original.fromMe) return false
 
@@ -517,15 +521,29 @@ const processMessage = async (
 
 				break
 			case proto.Message.ProtocolMessage.Type.REVOKE:
+				const revokeTargetKey = protocolMsg.key
+				logDeleteDiagnostic('baileys_revoke_received', {
+					target_key_present: !!revokeTargetKey,
+					target_id_present: !!revokeTargetKey?.id,
+					conversation_namespace: editIdentityNamespace(message.key),
+					group_chat: Boolean(isJidGroup(message.key.remoteJid || undefined))
+				})
+				if (!revokeTargetKey?.id) {
+					logger?.warn('message revoke: target key unavailable')
+					break
+				}
+
 				ev.emit('messages.update', [
 					{
 						key: {
 							...message.key,
-							id: protocolMsg.key!.id
+							id: revokeTargetKey.id
 						},
+						revokeTargetKey,
 						update: { message: null, messageStubType: WAMessageStubType.REVOKE, key: message.key }
 					}
 				])
+				logDeleteDiagnostic('baileys_revoke_emitted', { target_key_present: true })
 				break
 			case proto.Message.ProtocolMessage.Type.EPHEMERAL_SETTING:
 				Object.assign(chat, {

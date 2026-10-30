@@ -365,7 +365,12 @@ export type MessageUpsertType = 'append' | 'notify'
 
 export type MessageUserReceipt = proto.IUserReceipt
 
-export type WAMessageUpdate = { update: Partial<WAMessage>; key: WAMessageKey }
+export type WAMessageUpdate = {
+	update: Partial<WAMessage>
+	key: WAMessageKey
+	/** Original message key included only with a protocol REVOKE update. */
+	revokeTargetKey?: WAMessageKey
+}
 
 export type WAMessageCursor = { before: WAMessageKey | undefined } | { after: WAMessageKey | undefined }
 
