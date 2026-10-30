@@ -23,6 +23,7 @@ import {
 	isHostedLidUser,
 	isHostedPnUser,
 	isJidBroadcast,
+	isJidGroup,
 	isJidStatusBroadcast,
 	isLidUser,
 	jidDecode,
@@ -249,6 +250,32 @@ const logEditDiagnostic = (stage: string, fields: Record<string, boolean | strin
 	console.info({ diagnostic: 'whatsapp_edit', stage, ...fields })
 }
 
+const matchesEditIdentity = (received: WAMessageKey, original: WAMessageKey) => {
+	if (received.fromMe !== original.fromMe) return false
+
+	const group = isJidGroup(received.remoteJid || undefined)
+	const sameRemoteJid =
+		received.remoteJid === original.remoteJid ||
+		(!group &&
+			!received.fromMe &&
+			!!received.remoteJidAlt &&
+			!!original.remoteJidAlt &&
+			received.remoteJid === original.remoteJidAlt &&
+			received.remoteJidAlt === original.remoteJid)
+	if (!sameRemoteJid) return false
+
+	if (!group) return (received.participant || '') === (original.participant || '')
+	return (
+		!!received.participant &&
+		!!original.participant &&
+		(received.participant === original.participant ||
+			(!!received.participantAlt &&
+				!!original.participantAlt &&
+				received.participant === original.participantAlt &&
+				received.participantAlt === original.participant))
+	)
+}
+
 export const unwrapSecretEncryptedMessage = async (
 	message: WAMessage,
 	{
@@ -287,31 +314,25 @@ export const unwrapSecretEncryptedMessage = async (
 		return false
 	}
 
-	const key = secretEdit.targetMessageKey as WAMessageKey
-	if (!key?.id || !key.remoteJid || typeof key.fromMe !== 'boolean') {
+	const targetKey = secretEdit.targetMessageKey
+	if (!targetKey?.id) {
 		logEditDiagnostic('original_lookup', { result: 'invalid_target_key' })
 		logger?.warn('message edit: target key unavailable')
 		return false
 	}
-	// SecretEncryptedMessage.targetMessageKey is proto.MessageKey; alternate JIDs exist only on received WAMessage keys.
-	const envelopeKeyMismatches = {
-		envelope_from_me_mismatch: message.key.fromMe !== key.fromMe,
-		envelope_remote_jid_mismatch: message.key.remoteJid !== key.remoteJid,
-		envelope_participant_mismatch: (message.key.participant || '') !== (key.participant || ''),
-		envelope_remote_jid_alt_mismatch: (message.key.remoteJidAlt || '') !== (key.remoteJidAlt || ''),
-		envelope_participant_alt_mismatch: (message.key.participantAlt || '') !== (key.participantAlt || '')
+	const key = { ...message.key, id: targetKey.id }
+	const targetKeyDifferences = {
+		target_from_me_differs_from_envelope: message.key.fromMe !== targetKey.fromMe,
+		target_remote_jid_differs_from_envelope: message.key.remoteJid !== targetKey.remoteJid,
+		target_participant_differs_from_envelope: (message.key.participant || '') !== (targetKey.participant || '')
 	}
-	if (
-		envelopeKeyMismatches.envelope_from_me_mismatch ||
-		envelopeKeyMismatches.envelope_remote_jid_mismatch ||
-		envelopeKeyMismatches.envelope_participant_mismatch
-	) {
-		logEditDiagnostic('original_lookup', { result: 'envelope_identity_mismatch', ...envelopeKeyMismatches })
-		logger?.warn('message edit: envelope identity mismatch')
+	if (!key.remoteJid || typeof key.fromMe !== 'boolean' || (isJidGroup(key.remoteJid) && !key.participant)) {
+		logEditDiagnostic('original_lookup', { result: 'invalid_envelope_identity', ...targetKeyDifferences })
+		logger?.warn('message edit: envelope identity unavailable')
 		return false
 	}
 	if (!getMessageForEdit) {
-		logEditDiagnostic('original_lookup', { result: 'callback_unavailable', ...envelopeKeyMismatches })
+		logEditDiagnostic('original_lookup', { result: 'callback_unavailable', ...targetKeyDifferences })
 		logger?.warn('message edit: strict original lookup unavailable')
 		return false
 	}
@@ -320,18 +341,14 @@ export const unwrapSecretEncryptedMessage = async (
 	try {
 		original = await getMessageForEdit(key)
 	} catch {
-		logEditDiagnostic('original_lookup', { result: 'error', ...envelopeKeyMismatches })
+		logEditDiagnostic('original_lookup', { result: 'error', ...targetKeyDifferences })
 		return false
 	}
 	const exactOriginalMatches =
-		!!original?.message &&
-		original.key.id === key.id &&
-		original.key.fromMe === key.fromMe &&
-		original.key.remoteJid === key.remoteJid &&
-		(original.key.participant || '') === (key.participant || '')
+		!!original?.message && original.key.id === targetKey.id && matchesEditIdentity(key, original.key)
 	logEditDiagnostic('original_lookup', {
 		result: exactOriginalMatches ? 'matched' : 'no_exact_match',
-		...envelopeKeyMismatches
+		...targetKeyDifferences
 	})
 	if (!exactOriginalMatches || !original?.message) {
 		logger?.warn('message edit: exact original not found')
@@ -349,9 +366,12 @@ export const unwrapSecretEncryptedMessage = async (
 	}
 	logEditDiagnostic('original_secret', { available: true })
 
-	const authorJids = key.fromMe
+	const authorJids = original.key.fromMe
 		? [creds.me?.id, creds.me?.lid].filter((jid): jid is string => !!jid)
-		: [key.participant || key.remoteJid, key.participantAlt || key.remoteJidAlt].filter((jid): jid is string => !!jid)
+		: [
+				original.key.participant || original.key.remoteJid,
+				original.key.participantAlt || original.key.remoteJidAlt
+			].filter((jid): jid is string => !!jid)
 	let decoded: proto.Message | undefined
 	for (const authorJid of authorJids) {
 		try {
@@ -377,10 +397,10 @@ export const unwrapSecretEncryptedMessage = async (
 			logger?.warn('message edit: decrypted payload is not an edit')
 			return false
 		}
-		decoded.protocolMessage.key = key
+		decoded.protocolMessage.key = original.key
 	} else {
 		decoded.protocolMessage = {
-			key,
+			key: original.key,
 			type: proto.Message.ProtocolMessage.Type.MESSAGE_EDIT,
 			editedMessage: decoded
 		}
@@ -388,6 +408,7 @@ export const unwrapSecretEncryptedMessage = async (
 	if (!decoded.messageContextInfo && content?.messageContextInfo) {
 		decoded.messageContextInfo = content.messageContextInfo
 	}
+	message.key = original.key
 	message.message = decoded
 	logEditDiagnostic('decryption_result', { result: 'success' })
 	return true
